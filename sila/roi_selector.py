@@ -1,46 +1,22 @@
-import cv2
+import argparse
 import json
-import numpy as np
 from pathlib import Path
 from typing import List, Tuple
-
-# ==================================================
-# AYARLAR
-# ==================================================
-
-RTSP_URL = "rtsp://your5eyt:rfg34hg-6he@77.44.64.69:554/cam/realmonitor?channel=7&subtype=0"
-
-ROI_FILE = Path("config/roi_coordinates.json")
+import cv2
+import numpy as np
 
 WINDOW_NAME = "ROI Selection"
-
 selected_points: List[Tuple[int, int]] = []
 
-
-# ==================================================
-# MOUSE CALLBACK
-# ==================================================
-
 def mouse_callback(event, x, y, flags, param):
-
     if event == cv2.EVENT_LBUTTONDOWN:
-
         selected_points.append((x, y))
-
         print(f"{len(selected_points)}. nokta: ({x}, {y})")
 
-
-# ==================================================
-# ROI ÇİZ
-# ==================================================
-
 def draw_roi_selection(frame):
-
     display = frame.copy()
 
-    # Noktalar
     for index, point in enumerate(selected_points):
-
         cv2.circle(
             display,
             point,
@@ -59,9 +35,7 @@ def draw_roi_selection(frame):
             2
         )
 
-    # Polygon çiz
     if len(selected_points) >= 2:
-
         pts = np.array(selected_points, dtype=np.int32)
 
         cv2.polylines(
@@ -72,9 +46,7 @@ def draw_roi_selection(frame):
             2
         )
 
-    # Polygonu kapat ve içini boya
     if len(selected_points) >= 3:
-
         pts = np.array(selected_points, dtype=np.int32)
 
         overlay = display.copy()
@@ -133,36 +105,25 @@ def draw_roi_selection(frame):
 
     return display
 
-
-# ==================================================
-# ROI KAYDET
-# ==================================================
-
-def save_roi(frame_width, frame_height):
-
-    ROI_FILE.parent.mkdir(
+def save_roi(frame_width, frame_height, roi_file_path: Path):
+    roi_file_path.parent.mkdir(
         parents=True,
         exist_ok=True
     )
 
     roi_data = {
-
         "frame_width": frame_width,
-
         "frame_height": frame_height,
-
         "points": [
             [x, y]
             for x, y in selected_points
         ]
-
     }
 
-    with ROI_FILE.open(
+    with roi_file_path.open(
         "w",
         encoding="utf-8"
     ) as file:
-
         json.dump(
             roi_data,
             file,
@@ -171,21 +132,13 @@ def save_roi(frame_width, frame_height):
         )
 
     print()
-
     print("ROI başarıyla kaydedildi.")
+    print(roi_file_path.resolve())
 
-    print(ROI_FILE.resolve())
-
-
-# ==================================================
-# İLK FRAME
-# ==================================================
-
-def get_first_frame():
-
+def get_first_frame(rtsp_url):
     print("RTSP bağlantısı kuruluyor...")
 
-    cap = cv2.VideoCapture(RTSP_URL)
+    cap = cv2.VideoCapture(rtsp_url)
 
     cap.set(
         cv2.CAP_PROP_BUFFERSIZE,
@@ -193,46 +146,47 @@ def get_first_frame():
     )
 
     if not cap.isOpened():
-
         print("RTSP açılamadı.")
-
         return None
 
     frame = None
 
     for _ in range(100):
-
         success, current_frame = cap.read()
-
         if success:
-
             frame = current_frame
-
             break
 
     cap.release()
 
     if frame is None:
-
         print("Frame alınamadı.")
-
         return None
 
     print("İlk frame alındı.")
-
     return frame
 
-
-# ==================================================
-# MAIN
-# ==================================================
-
 def main():
+    parser = argparse.ArgumentParser(description="Interactive ROI Selector Tool")
+    parser.add_argument(
+        "--rtsp",
+        type=str,
+        default="rtsp://your5eyt:rfg34hg-6he@77.44.64.69:554/cam/realmonitor?channel=7&subtype=0",
+        help="RTSP stream URL or video path"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config/roi_coordinates.json",
+        help="Path to save the ROI JSON configuration file"
+    )
 
-    frame = get_first_frame()
+    args = parser.parse_args()
+    roi_file_path = Path(args.config)
+
+    frame = get_first_frame(args.rtsp)
 
     if frame is None:
-
         return
 
     frame_height, frame_width = frame.shape[:2]
@@ -250,7 +204,6 @@ def main():
     )
 
     while True:
-
         display = draw_roi_selection(frame)
 
         cv2.imshow(
@@ -260,48 +213,38 @@ def main():
 
         key = cv2.waitKey(20) & 0xFF
 
-        # Undo
+        # undo
         if key == ord("z"):
-
             if selected_points:
-
                 removed = selected_points.pop()
-
                 print(f"Silindi : {removed}")
 
-        # Reset
+        # reset
         elif key == ord("r"):
-
             selected_points.clear()
-
             print("ROI sıfırlandı.")
 
-        # Save
+        # save
         elif key == ord("s"):
-
             if len(selected_points) < 3:
-
                 print("En az 3 nokta seçmelisin.")
-
                 continue
 
             save_roi(
                 frame_width,
-                frame_height
+                frame_height,
+                roi_file_path
             )
 
             break
 
-        # Quit
+        # quit
         elif key == ord("q") or key == 27:
-
             print("ROI kaydedilmedi.")
-
             break
 
     cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-
     main()

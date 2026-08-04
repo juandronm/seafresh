@@ -1,16 +1,24 @@
 import json
 from pathlib import Path
+from datetime import datetime
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import torch
 
+# detection hours are currently based on Turkey local time (UTC+3)
+# if the application is deployed on a server with a different timezone
+# update this logic according to the server timezone
+
+START_HOUR = 0
+END_HOUR = 9
 
 class ForbiddenAreaDetector:
     def __init__(
         self,
         model_path: str = "yolov8m.pt",
         config_path: str = "config/roi_coordinates.json",
-        rtsp_url: str = "rtsp://your5eyt:rfg34hg-6he@77.44.64.69:554/cam/playback?channel=7&subtype=0&starttime=2026_07_22_18_30_00&endtime=2026_07_22_21_00_00"
+        rtsp_url: str = None
     ):
         base_dir = Path(__file__).resolve().parent
 
@@ -26,91 +34,71 @@ class ForbiddenAreaDetector:
             if candidate.exists():
                 self.config_path = candidate
 
+        # macOS: mps, Windows/Linux: cuda
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
+
+        print(f"YOLO kullanılacak donanım (Device): {self.device}")
+
         self.model = YOLO(str(self.model_path))
+        self.model.to(self.device)
+
         self.rtsp_url = rtsp_url
         self.roi_polygon = self._load_roi()
 
-    def _load_roi(self) -> np.ndarray:
-        """JSON dosyasından ROI koordinatlarını okur ve NumPy formatına çevirir."""
+    def _load_roi(self):
         if not self.config_path.exists():
-            raise FileNotFoundError(f"Konfigürasyon dosyası bulunamadı: {self.config_path}")
+            raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
 
         with open(self.config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         points = data.get("points", [])
         if len(points) < 3:
-            raise ValueError("Geçerli bir ROI için en az 3 nokta gereklidir.")
+            raise ValueError("ROI must contain at least 3 points.")
 
         return np.array(points, dtype=np.int32)
 
-    def is_inside_roi(self, point: tuple) -> bool:
-        """Verilen (x, y) noktasının ROI alanının içinde olup olmadığını kontrol eder."""
-        # > 0: İçinde, 0: Kenarında, < 0: Dışında
-        result = cv2.pointPolygonTest(self.roi_polygon, (float(point[0]), float(point[1])), False)
+    def is_detection_time(self):
+        current_hour = datetime.now().hour
+        return START_HOUR <= current_hour < END_HOUR
+
+    def is_inside_roi(self, point):
+        result = cv2.pointPolygonTest(
+            self.roi_polygon,
+            (float(point[0]), float(point[1])),
+            False,
+        )
         return result >= 0
 
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Görüntü üzerinde YOLO tespiti ve ROI kontrolü yapar."""
-        results = self.model(frame, verbose=False, classes=[0])  # Sadece person (class 0) tespiti
+    def detect(self, frame):
+        person_in_roi = False
+        detections = []
+
+        results = self.model(frame, verbose=False, classes=[0], device=self.device)
 
         for result in results:
             for box in result.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 
-                # Kişinin ayak noktası (alt tabanın ortası)
-                foot_point = ((x1 + x2) // 2, y2)
+                points_to_check = [
+                    ((x1 + x2) // 2, (y1 + y2) // 2), 
+                    (x1, y2),                      
+                    (x2, y2)                       
+                ]
 
-                # ROI Dışındaki kişileri tamamen görmezden gel
-                if not self.is_inside_roi(foot_point):
-                    continue
+                in_roi = any(self.is_inside_roi(pt) for pt in points_to_check)
 
-                # ROI içindeyse kırmızı kutu çiz
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                if in_roi:
+                    person_in_roi = True
 
-                # Etiket ve metin ekle
-                label = "PERSON IN FORBIDDEN AREA"
-                cv2.putText(
-                    frame,
-                    label,
-                    (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2
-                )
+                detections.append({
+                    "box": (x1, y1, x2, y2),
+                    "in_roi": in_roi
+                })
 
-        # Görselleştirmek için ROI alanını da hafif çizebiliriz (isteğe bağlı)
-        cv2.polylines(frame, [self.roi_polygon], True, (255, 255, 0), 2)
-        return frame
-
-    def run(self):
-        """Kamera akışını başlatır ve ana döngüyü çalıştırır."""
-        cap = cv2.VideoCapture(self.rtsp_url)
-
-        if not cap.isOpened():
-            print("RTSP bağlantısı kurulamadı.")
-            return
-
-        print("RTSP bağlantısı başarılı. Tespit başlatılıyor...")
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Frame okunamadı veya akış sona erdi.")
-                break
-
-            processed_frame = self.process_frame(frame)
-
-            cv2.imshow("Forbidden Area Detection", processed_frame)
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-
-        cap.release()
-        cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    detector = ForbiddenAreaDetector()
-    detector.run()
+        return detections, person_in_roi
